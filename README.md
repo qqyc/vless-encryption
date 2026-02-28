@@ -3,12 +3,12 @@
 
 ## 一键安装
 ```
-bash <(curl -L https://raw.githubusercontent.com/yahuisme/vless-encryption/main/install.sh)
+bash <(curl -L https://raw.githubusercontent.com/qqyc/vless-encryption/main/install.sh)
 ```
 
 ## 无交互安装
 ```
-bash <(curl -L https://raw.githubusercontent.com/yahuisme/vless-encryption/main/install.sh) install --port 12345 --uuid 'd0f6a483-51b3-44eb-94b6-1f5fc9272c81'
+bash <(curl -L https://raw.githubusercontent.com/qqyc/vless-encryption/main/install.sh) install --port 12345 --uuid 'd0f6a483-51b3-44eb-94b6-1f5fc9272c81'
 ```
 
 ## 特别提示
