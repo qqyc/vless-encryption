@@ -19,7 +19,7 @@
 # 不使用 set -e，所有错误通过显式检查处理
 
 # --- 全局变量 ---
-SCRIPT_VERSION="V1.6.0"
+SCRIPT_VERSION="V1.7.0"
 xray_config_path="/usr/local/etc/xray/config.json"
 xray_binary_path="/usr/local/bin/xray"
 xray_install_script_url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
