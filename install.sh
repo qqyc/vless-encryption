@@ -380,23 +380,26 @@ restart_xray() {
         return 1
     fi
 
-    # 重启前先验证配置
+    # 以 nobody 身份验证配置（与实际服务运行用户一致）
     if [ -f "$xray_config_path" ]; then
         info "正在验证配置文件..."
-        if ! "$xray_binary_path" run -test -config "$xray_config_path" >/dev/null 2>&1; then
-            error "配置文件验证失败！请检查配置。"
-            "$xray_binary_path" run -test -config "$xray_config_path" 2>&1 | head -5 >&2
+        # 用 sudo -u nobody 模拟真实运行环境
+        if ! sudo -u nobody "$xray_binary_path" run -test \
+             -config "$xray_config_path" >/dev/null 2>&1; then
+            error "配置文件验证失败（以 nobody 用户）！"
+            # 回退到 root 测试以获取详细错误信息
+            "$xray_binary_path" run -test -config "$xray_config_path" 2>&1 \
+                | head -5 >&2
             return 1
         fi
     fi
 
     info "正在重启 Xray 服务..."
     if ! systemctl restart xray; then
-        error "错误: Xray 服务重启失败, 请使用菜单 5 查看日志检查具体原因。"
+        error "错误: Xray 服务重启失败。"
         return 1
     fi
 
-    # 轮询等待，最多 5 秒
     local max_wait=5
     local i=0
     while [ $i -lt $max_wait ]; do
@@ -408,7 +411,8 @@ restart_xray() {
         i=$((i + 1))
     done
 
-    error "错误: Xray 服务启动超时 (${max_wait}s), 请使用菜单 5 查看日志检查具体原因。"
+    error "错误: Xray 服务启动超时 (${max_wait}s)，查看日志："
+    journalctl -u xray --no-pager -n 10 >&2
     return 1
 }
 
@@ -595,7 +599,6 @@ view_subscription_info() {
 write_config() {
     local port="$1" uuid="$2" decryption_config="$3" encryption_config="$4"
 
-    # 写入客户端加密信息（敏感文件，权限 600）
     (umask 077; echo "$encryption_config" > ~/xray_encryption_info.txt)
 
     local config_dir
@@ -628,9 +631,13 @@ write_config() {
         }]
     }' > "$xray_config_path"
 
-    # 安全加固：仅 root 可读写
-    chmod 600 "$xray_config_path"
-    chown root:root "$xray_config_path"
+    # ========== 修正的权限设置 ==========
+    # Xray 服务以 nobody 用户运行，需要读取配置文件
+    # 方案：640 root:<nobody的组>，兼顾安全与可用性
+    local xray_group
+    xray_group=$(id -gn nobody 2>/dev/null || echo "nogroup")
+    chmod 640 "$xray_config_path"
+    chown "root:${xray_group}" "$xray_config_path"
 }
 
 run_install() {
