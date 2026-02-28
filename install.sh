@@ -317,6 +317,13 @@ install_xray() {
         read -r port
         [ -z "$port" ] && port=443
         if is_valid_port "$port"; then
+            # 新增：端口冲突检测
+            if command -v ss >/dev/null 2>&1; then
+                if ss -tulpan | grep -q ":$port "; then
+                    error "端口 $port 已经被系统中的其他程序占用，请更换端口！"
+                    continue
+                fi
+            fi
             break
         else
             error "端口无效，请输入一个1-65535之间的数字。"
@@ -380,17 +387,25 @@ restart_xray() {
         return 1
     fi
 
-    # 以 nobody 身份验证配置（与实际服务运行用户一致）
     if [ -f "$xray_config_path" ]; then
         info "正在验证配置文件..."
-        # 用 sudo -u nobody 模拟真实运行环境
-        if ! sudo -u nobody "$xray_binary_path" run -test \
-             -config "$xray_config_path" >/dev/null 2>&1; then
-            error "配置文件验证失败（以 nobody 用户）！"
-            # 回退到 root 测试以获取详细错误信息
-            "$xray_binary_path" run -test -config "$xray_config_path" 2>&1 \
-                | head -5 >&2
-            return 1
+        # 修正：使用 su 替代 sudo，因为并非所有极简系统都有 sudo
+        local run_user
+        run_user=$(id -nu nobody 2>/dev/null || echo "root")
+        
+        if command -v su >/dev/null 2>&1 && [ "$run_user" != "root" ]; then
+            if ! su -s /bin/bash "$run_user" -c "\"$xray_binary_path\" run -test -config \"$xray_config_path\"" >/dev/null 2>&1; then
+                error "配置文件验证失败！"
+                "$xray_binary_path" run -test -config "$xray_config_path" 2>&1 | head -5 >&2
+                return 1
+            fi
+        else
+            # 如果没有 su 或者找不到 nobody 用户，直接用 root 测
+            if ! "$xray_binary_path" run -test -config "$xray_config_path" >/dev/null 2>&1; then
+                error "配置文件验证失败！"
+                "$xray_binary_path" run -test -config "$xray_config_path" 2>&1 | head -5 >&2
+                return 1
+            fi
         fi
     fi
 
@@ -430,9 +445,12 @@ uninstall_xray() {
     fi
 
     info "正在卸载 Xray..."
-    if execute_official_script "remove --purge"; then
+    if execute_official_script "remove"; then
+        # 新增：彻底清理残留文件
+        rm -rf /usr/local/etc/xray
+        rm -rf /var/log/xray
         rm -f ~/xray_vless_encryption_link.txt ~/xray_encryption_info.txt
-        success "Xray 已成功卸载。"
+        success "Xray 已成功彻底卸载。"
     else
         error "Xray 卸载失败！"
         return 1
