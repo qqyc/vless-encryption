@@ -8,6 +8,7 @@
 - 客户端 0-RTT / 服务端 600 秒会话票据
 - `xtls-rprx-vision`
 - RAW/TCP，底层传输安全为 `none`
+- 直接使用服务器公网 IP，无需域名、证书或 SNI
 
 > [!IMPORTANT]
 > VLESS Encryption 仍在快速演进，客户端必须支持该协议和当前分享链接格式。它不是 TLS/REALITY 的通用替代品，也不保证适合所有网络环境。请先在测试环境验证。
@@ -42,8 +43,10 @@ curl -fL --proto '=https' --tlsv1.2 \
   -o install.sh \
   https://raw.githubusercontent.com/qqyc/vless-encryption/main/install.sh
 less install.sh
-sudo bash install.sh install --port 443 --address example.com
+sudo bash install.sh install --port 443
 ```
+
+脚本会自动检测服务器公网 IPv4（没有 IPv4 时再尝试 IPv6），因此安装时无需提供域名。`--address` 只是在公网 IP 自动检测不正确时，覆盖客户端分享链接中的连接地址；它不会写入 Xray 服务端配置，也不会启用域名、TLS、证书或 SNI。
 
 也可以打开交互式菜单：
 
@@ -57,7 +60,6 @@ sudo bash install.sh
 sudo bash install.sh install \
   --port 8443 \
   --uuid d0f6a483-51b3-44eb-94b6-1f5fc9272c81 \
-  --address 203.0.113.10 \
   --yes
 ```
 
@@ -101,8 +103,8 @@ sudo bash install.sh config --uuid d0f6a483-51b3-44eb-94b6-1f5fc9272c81
 # 轮换加密密钥；原客户端链接会立即失效
 sudo bash install.sh config --rotate-keys
 
-# 使用指定域名重新生成分享链接
-sudo bash install.sh link --address example.com
+# 公网 IP 自动检测不正确时，用真实服务器 IP 覆盖分享链接地址
+sudo bash install.sh link --address YOUR_SERVER_IP
 
 # 查看日志
 sudo bash install.sh logs

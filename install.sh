@@ -6,7 +6,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="2.0.1"
 
 XRAY_BIN="${XRAY_BIN:-/usr/local/bin/xray}"
 XRAY_CONFIG_DIR="${XRAY_CONFIG_DIR:-/usr/local/etc/xray}"
@@ -276,11 +276,20 @@ generate_vlessenc_pair() {
 
 validate_server_address() {
     local address="${1:-}"
-    local colon_chars label
+    local colon_chars label normalized
     local labels=()
 
     [[ -n "$address" ]] || return 1
     [[ ! "$address" =~ [[:space:]@/#?] ]] || return 1
+
+    # These names are reserved for documentation. Accepting them makes a
+    # copy-pasted example look valid while producing an unusable share link.
+    normalized="${address,,}"
+    case "$normalized" in
+        example|*.example|example.com|*.example.com|example.net|*.example.net|example.org|*.example.org)
+            return 1
+            ;;
+    esac
 
     if [[ "$address" == *:* ]]; then
         colon_chars="${address//[^:]/}"
@@ -991,7 +1000,7 @@ Xray VLESS Encryption 安装管理脚本 ${SCRIPT_VERSION}
 install 选项:
   --port <端口>              默认 443
   --uuid <UUID>              默认自动生成
-  --address <IP或域名>       保存并用于生成客户端链接
+  --address <IP或域名>       仅覆盖客户端链接地址；默认自动检测公网 IP
   --no-geodata               不安装 GeoIP/GeoSite
   --yes, -y                  不询问覆盖确认
   --quiet, -q                标准输出只保留客户端链接
@@ -999,14 +1008,14 @@ install 选项:
 config 选项:
   --port <端口>              留空则保持不变
   --uuid <UUID>              留空则保持不变
-  --address <IP或域名>       更新客户端地址
+  --address <IP或域名>       仅更新客户端链接地址，不配置 TLS/SNI
   --rotate-keys              轮换加密密钥（现有客户端会失效）
 
 示例:
-  $0 install --port 443 --address example.com --yes
+  $0 install --port 443 --yes
   $0 install --port 8443 --uuid d0f6a483-51b3-44eb-94b6-1f5fc9272c81 --quiet
   $0 config --port 2053
-  $0 link --address 203.0.113.10 --quiet
+  $0 link --quiet
 EOF
 }
 
