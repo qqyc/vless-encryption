@@ -6,7 +6,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="2.0.1"
+SCRIPT_VERSION="2.0.2"
 
 XRAY_BIN="${XRAY_BIN:-/usr/local/bin/xray}"
 XRAY_CONFIG_DIR="${XRAY_CONFIG_DIR:-/usr/local/etc/xray}"
@@ -420,6 +420,8 @@ render_config() {
     local uuid="$3"
     local decryption="$4"
 
+    # Xray 26.3.27 actually loads inbound users from `clients`. The parser also
+    # accepts `users`, but silently registers no UUIDs at runtime.
     jq -n \
         --argjson port "$port" \
         --arg uuid "$uuid" \
@@ -432,7 +434,7 @@ render_config() {
                 port: $port,
                 protocol: "vless",
                 settings: {
-                    users: [{id: $uuid, flow: "xtls-rprx-vision"}],
+                    clients: [{id: $uuid, flow: "xtls-rprx-vision"}],
                     decryption: $decryption
                 }
             }],
@@ -462,7 +464,7 @@ read_current_config() {
         | (($all | map(select(.tag == "vless-encryption-in")) | .[0]) // $all[0]) as $in
         | [
             $in.port,
-            ($in.settings.users[0].id // $in.settings.clients[0].id),
+            ($in.settings.clients[0].id // $in.settings.users[0].id),
             $in.settings.decryption
           ]
         | @tsv
@@ -480,6 +482,7 @@ is_legacy_managed_config() {
         ((keys - ["inbounds", "log", "outbounds"]) | length) == 0 and
         (.inbounds | length) == 1 and
         (.outbounds | length) == 1 and
+        (.inbounds[0] | has("tag") | not) and
         .inbounds[0].protocol == "vless" and
         (.inbounds[0].settings.decryption | startswith("mlkem768x25519plus.")) and
         (.inbounds[0].settings.clients | type == "array") and
@@ -496,13 +499,27 @@ is_current_managed_config() {
         .inbounds[0].tag == "vless-encryption-in" and
         .inbounds[0].protocol == "vless" and
         (.inbounds[0].settings.decryption | startswith("mlkem768x25519plus.")) and
+        (.inbounds[0].settings.clients | type == "array") and
+        .outbounds[0].protocol == "freedom"
+    ' "$XRAY_CONFIG_PATH" >/dev/null 2>&1
+}
+
+is_broken_users_config() {
+    [[ -r "$XRAY_CONFIG_PATH" ]] || return 1
+    jq -e '
+        ((keys - ["inbounds", "log", "outbounds"]) | length) == 0 and
+        (.inbounds | length) == 1 and
+        (.outbounds | length) == 1 and
+        .inbounds[0].tag == "vless-encryption-in" and
+        .inbounds[0].protocol == "vless" and
+        (.inbounds[0].settings.decryption | startswith("mlkem768x25519plus.")) and
         (.inbounds[0].settings.users | type == "array") and
         .outbounds[0].protocol == "freedom"
     ' "$XRAY_CONFIG_PATH" >/dev/null 2>&1
 }
 
 is_script_managed_config() {
-    is_current_managed_config || is_legacy_managed_config
+    is_current_managed_config || is_legacy_managed_config || is_broken_users_config
 }
 
 load_client_encryption() {
@@ -742,8 +759,14 @@ cmd_update() {
     run_official_installer "${installer_args[@]}" || die "Xray 更新失败。"
     require_vless_encryption_support
 
-    if is_legacy_managed_config; then
-        warn "检测到旧版 clients 配置，正在迁移到当前 Xray 的 users 格式。"
+    if is_broken_users_config; then
+        warn "检测到 2.0.0/2.0.1 的无效 users 配置，正在修复为 Xray 实际加载的 clients 格式。"
+        read_current_config || die "无法读取待修复配置。"
+        load_client_encryption || die "无法读取客户端密钥。"
+        apply_configuration "$CURRENT_PORT" "$CURRENT_UUID" "$CURRENT_DECRYPTION" "$VLESS_ENCRYPTION" ||
+            die "users 配置修复失败。"
+    elif is_legacy_managed_config; then
+        warn "检测到旧版脚本配置，正在更新为当前受管格式。"
         read_current_config || die "无法读取旧版配置。"
         load_client_encryption || die "无法读取旧版客户端密钥。"
         apply_configuration "$CURRENT_PORT" "$CURRENT_UUID" "$CURRENT_DECRYPTION" "$VLESS_ENCRYPTION" ||
@@ -989,7 +1012,7 @@ Xray VLESS Encryption 安装管理脚本 ${SCRIPT_VERSION}
 用法:
   $0                         打开交互式菜单
   $0 install [选项]          安装或重装
-  $0 update [选项]           更新 Xray，并迁移旧版 clients 配置
+  $0 update [选项]           更新 Xray，并修复/迁移旧版配置
   $0 config [选项]           修改端口、UUID 或轮换密钥
   $0 link [选项]             输出客户端分享链接
   $0 status                  查看状态

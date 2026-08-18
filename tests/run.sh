@@ -109,13 +109,13 @@ render_config \
     "mlkem768x25519plus.native.600s.private"
 
 assert_equals \
-    "renders the current users field" \
+    "renders the runtime-compatible clients field" \
     "$VALID_UUID" \
-    "$(jq -r '.inbounds[0].settings.users[0].id' "$CONFIG_TEMP")"
+    "$(jq -r '.inbounds[0].settings.clients[0].id' "$CONFIG_TEMP")"
 assert_equals \
-    "does not render the removed clients field" \
+    "does not render the ignored users field" \
     "false" \
-    "$(jq 'has("clients")' < <(jq '.inbounds[0].settings' "$CONFIG_TEMP"))"
+    "$(jq 'has("users")' < <(jq '.inbounds[0].settings' "$CONFIG_TEMP"))"
 assert_equals \
     "renders a numeric port" \
     "number" \
@@ -127,20 +127,32 @@ assert_equals \
 
 XRAY_CONFIG_PATH="$CONFIG_TEMP"
 assert_true "recognizes a current managed config" is_current_managed_config
+assert_false "does not mistake the current config for legacy" is_legacy_managed_config
+assert_false "does not mistake the current config for broken users" is_broken_users_config
 read_current_config || fail "reads a current managed config"
 assert_equals "reads the current UUID" "$VALID_UUID" "$CURRENT_UUID"
 
 LEGACY_CONFIG_TEMP="$(mktemp)"
 register_temp_file "$LEGACY_CONFIG_TEMP"
 jq '
-    .inbounds[0].settings.clients = .inbounds[0].settings.users
-    | del(.inbounds[0].settings.users)
-    | del(.inbounds[0].tag)
+    del(.inbounds[0].tag)
 ' "$CONFIG_TEMP" >"$LEGACY_CONFIG_TEMP"
 XRAY_CONFIG_PATH="$LEGACY_CONFIG_TEMP"
 assert_true "recognizes a legacy managed config" is_legacy_managed_config
 read_current_config || fail "reads a legacy managed config"
 assert_equals "reads a legacy clients UUID" "$VALID_UUID" "$CURRENT_UUID"
+
+BROKEN_USERS_CONFIG_TEMP="$(mktemp)"
+register_temp_file "$BROKEN_USERS_CONFIG_TEMP"
+jq '
+    .inbounds[0].settings.users = .inbounds[0].settings.clients
+    | del(.inbounds[0].settings.clients)
+' "$CONFIG_TEMP" >"$BROKEN_USERS_CONFIG_TEMP"
+XRAY_CONFIG_PATH="$BROKEN_USERS_CONFIG_TEMP"
+assert_true "recognizes the broken 2.0 users config" is_broken_users_config
+assert_true "allows the broken users config to be repaired" is_script_managed_config
+read_current_config || fail "reads the UUID from a broken users config"
+assert_equals "preserves the UUID while repairing users" "$VALID_UUID" "$CURRENT_UUID"
 
 CUSTOM_CONFIG_TEMP="$(mktemp)"
 register_temp_file "$CUSTOM_CONFIG_TEMP"

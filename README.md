@@ -15,8 +15,8 @@
 
 ## 这次重构修复了什么
 
-- 将旧版入站配置的 `settings.clients` 更新为当前 Xray 使用的 `settings.users`。
-- `update` 会识别本项目旧配置，并自动迁移；旧配置和客户端密钥仍可读取。
+- 服务端用户列表使用 Xray 当前实际加载的 `settings.clients`；修复了 `users` 虽能通过语法检查、运行时却未注册 UUID 的问题。
+- `update` 会识别本项目旧配置以及 2.0.0/2.0.1 生成的无效 `users` 配置并自动修复；旧客户端密钥仍可读取。
 - 写入前运行 `xray run -test`，写入采用临时文件；服务启动失败时自动回滚。
 - 每次替换主配置前保存带时间戳的备份。
 - 客户端凭据改存于 `/var/lib/vless-encryption/`，目录权限为 `0700`、文件为 `0600`。
@@ -77,7 +77,7 @@ link="$(sudo bash install.sh install --port 443 --yes --quiet)"
 sudo bash install.sh update
 ```
 
-如果检测到本项目旧版生成的单入站配置，脚本会把 `clients` 迁移为 `users`，并把旧的 `/root/xray_encryption_info.txt` 迁移到受限状态目录。修改前的主配置保存在：
+如果检测到本项目旧版生成的单入站配置，或 2.0.0/2.0.1 错误生成的 `settings.users` 配置，脚本会统一修复为 Xray 实际加载的 `settings.clients`，并把旧的 `/root/xray_encryption_info.txt` 迁移到受限状态目录。修改前的主配置保存在：
 
 ```text
 /usr/local/etc/xray/config.json.bak.<UTC时间>.<进程号>
