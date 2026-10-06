@@ -1,0 +1,35 @@
+name: Test installer
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq shellcheck
+      - name: Syntax and lint
+        run: |
+          bash -n install.sh
+          shellcheck install.sh
+      - name: Download checksum-verified official test core
+        run: |
+          curl --fail --location --retry 3 --max-time 120 \
+            https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip \
+            -o "$RUNNER_TEMP/xray.zip"
+          printf '%s  %s\n' '23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae' "$RUNNER_TEMP/xray.zip" | sha256sum -c
+          mkdir -p "$RUNNER_TEMP/xray-test"
+          unzip -q "$RUNNER_TEMP/xray.zip" -d "$RUNNER_TEMP/xray-test"
+          chmod +x "$RUNNER_TEMP/xray-test/xray"
+          echo "XRAY_TEST_BINARY=$RUNNER_TEMP/xray-test/xray" >> "$GITHUB_ENV"
+      - name: Regression and real loopback handshake
+        run: |
+          python3 tests/regression.py
+          python3 tests/connectivity.py

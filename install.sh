@@ -2,17 +2,22 @@
 # ==============================================================================
 # Xray VLESS Encryption 极简一键安装脚本
 # 系统支持: Debian 10+ / Ubuntu 20.04+
-# 版本: v26.09.27
+# 版本: v26.09.27-qqyc.1
 # ==============================================================================
 
 set -euo pipefail
 
-SCRIPT_VERSION="v26.09.27"
+SCRIPT_VERSION="v26.09.27-qqyc.1"
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_CONFIG="/usr/local/etc/xray/config.json"
 XRAY_INSTALL_URL="https://raw.githubusercontent.com/XTLS/Xray-install/e741a4f56d368afbb9e5be3361b40c4552d3710d/install-release.sh"
 XRAY_INSTALL_SHA256="7f70c95f6b418da8b4f4883343d602964915e28748993870fd554383afdbe555"
 ENCRYPTION_INFO="/root/xray_encryption_info.txt"
+UPSTREAM_ENCRYPTION_INFO="$ENCRYPTION_INFO"
+FORK_ENCRYPTION_INFO="/var/lib/vless-encryption/client-encryption"
+SERVER_ADDRESS_INFO="/var/lib/vless-encryption/server-address"
+SERVER_ADDRESS=""
+REINSTALL_CONFIRMED=false
 REALITY_INFO="/root/xray_reality_info.txt"       # public_key|sni|short_id
 SUBSCRIPTION_INFO="/root/xray_vless_link.txt"
 AUTH_MODE="mlkem768"
@@ -54,6 +59,27 @@ error() {
     esac
 }
 section_title() { cecho "$C_MAGENTA$C_BOLD" "◆ $1" 1; }
+
+select_client_state() {
+    # Older qqyc installs keep the current key here; /root may contain a stale key.
+    # Keep using this file for writes and snapshots too, without rotating keys.
+    if [ -f "$FORK_ENCRYPTION_INFO" ]; then
+        ENCRYPTION_INFO="$FORK_ENCRYPTION_INFO"
+    fi
+}
+
+confirm_reinstall() {
+    local confirm
+    [ -f "$XRAY_CONFIG" ] || return 0
+    [ "$REINSTALL_CONFIRMED" = true ] && return 0
+    if [ ! -t 0 ]; then
+        error "已有 Xray 配置；非交互重装必须显式添加 --reinstall。"
+        return 2
+    fi
+    warning "重装会覆盖整个配置并重新生成密钥，旧节点链接将失效；更新核心或修改参数请使用菜单。"
+    read -r -p "  确定重装？[y/N]: " confirm || return 2
+    [[ "$confirm" =~ ^[yY]$ ]] || { info "已取消重装。"; return 1; }
+}
 
 require_root_and_dependencies() {
     [ "$(id -u)" = 0 ] || { error "必须以 root 用户运行此脚本。"; exit 1; }
@@ -410,9 +436,46 @@ valid_ipv6() {
     if [ "$left" = full ]; then [ "$count" = 8 ]; else [ "$count" -lt 8 ]; fi
 }
 
+normalize_address() {
+    local address="$1" octet
+    local -a octets
+    if [[ "$address" = \[*\] ]]; then address=${address:1:${#address}-2}; fi
+    if [[ "$address" = *:* ]]; then
+        valid_ipv6 "$address" || return 1
+        printf '[%s]\n' "$address"
+    elif [[ "$address" =~ ^[0-9.]+$ ]]; then
+        IFS=. read -r -a octets <<< "$address"
+        [ "${#octets[@]}" = 4 ] && [[ "$address" != *. ]] || return 1
+        for octet in "${octets[@]}"; do
+            [[ "$octet" =~ ^(0|[1-9][0-9]{0,2})$ ]] && [ "$octet" -le 255 ] || return 1
+        done
+        printf '%s\n' "$address"
+    else
+        valid_sni "$address" || return 1
+        printf '%s\n' "$address"
+    fi
+}
+
+save_server_address() {
+    local address tmp
+    address=$(normalize_address "$SERVER_ADDRESS") || return 1
+    install -d -m 0700 "$(dirname "$SERVER_ADDRESS_INFO")" || return 1
+    tmp=$(mktemp "${SERVER_ADDRESS_INFO}.tmp.XXXXXX") || return 1
+    if ! chmod 600 "$tmp" || ! printf '%s\n' "$address" > "$tmp" || ! mv -f "$tmp" "$SERVER_ADDRESS_INFO"; then
+        rm -f "$tmp"
+        return 1
+    fi
+}
+
 public_ip() {
     local ip valid octet cache_file="/usr/local/etc/xray/.public-ip"
     local -a ip_octets
+    if [ -n "$SERVER_ADDRESS" ]; then normalize_address "$SERVER_ADDRESS"; return; fi
+    if [ -f "$SERVER_ADDRESS_INFO" ]; then
+        ip=$(tr -d '\r\n' < "$SERVER_ADDRESS_INFO")
+        normalize_address "$ip" || { error "已保存的服务器地址无效，请用 --address 指定。"; return 1; }
+        return
+    fi
     # 缓存 1 天，避免每次查看配置都发起网络请求；公网 IP 变更后自动刷新
     if [ -f "$cache_file" ] && [ -z "$(find "$cache_file" -mmin +1440 2>/dev/null)" ]; then
         ip=$(<"$cache_file")
@@ -473,6 +536,9 @@ show_subscription() {
     if ! chmod 600 "$sub_tmp" || ! printf '%s\n' "$link" > "$sub_tmp" || ! mv -f "$sub_tmp" "$SUBSCRIPTION_INFO"; then
         rm -f "$sub_tmp"
         error "保存订阅链接失败。"; return 1
+    fi
+    if [ -n "$SERVER_ADDRESS" ] && ! save_server_address; then
+        error "无法保存指定的服务器地址。"; return 1
     fi
     print_divider
     cecho "$C_CYAN" " --- VLESS 订阅信息 --- "
@@ -568,7 +634,8 @@ stop_xray_processes() {
 
 has_xray_residue() {
     local path pids
-    for path in "$XRAY_BIN" "$XRAY_CONFIG" "$ENCRYPTION_INFO" "$REALITY_INFO" "$SUBSCRIPTION_INFO" \
+    for path in "$XRAY_BIN" "$XRAY_CONFIG" "$ENCRYPTION_INFO" "$FORK_ENCRYPTION_INFO" "$UPSTREAM_ENCRYPTION_INFO" \
+        "$SERVER_ADDRESS_INFO" "$REALITY_INFO" "$SUBSCRIPTION_INFO" \
         /usr/local/etc/xray /usr/local/share/xray /var/log/xray \
         /etc/systemd/system/xray.service /etc/systemd/system/xray@.service \
         /etc/systemd/system/xray.service.d /etc/systemd/system/xray@.service.d; do
@@ -606,7 +673,8 @@ uninstall_xray() {
     if ! rm -rf /usr/local/etc/xray /usr/local/share/xray /var/log/xray \
             /etc/systemd/system/xray.service.d /etc/systemd/system/xray@.service.d ||
        ! rm -f "$XRAY_BIN" /etc/systemd/system/xray.service /etc/systemd/system/xray@.service \
-            "$ENCRYPTION_INFO" "$REALITY_INFO" "$SUBSCRIPTION_INFO"; then
+            "$ENCRYPTION_INFO" "$FORK_ENCRYPTION_INFO" "$UPSTREAM_ENCRYPTION_INFO" \
+            "$SERVER_ADDRESS_INFO" "$REALITY_INFO" "$SUBSCRIPTION_INFO"; then
         error "残留文件清理失败，保留本脚本以便重试。"; return 1
     fi
     systemctl daemon-reload || { error "systemd 重载失败。"; return 1; }
@@ -769,6 +837,7 @@ restart_xray() {
 
 install_selected() {
     local port="$1" uuid="$2" mode="$3" sni="${4:-}" sid="${5:-}" pair dec enc keys private public
+    confirm_reinstall || return $?
     local total=4 path
     local -a service_args=()
     [ "$mode" != reality ] || total=5
@@ -1003,6 +1072,7 @@ Xray VLESS Unified Installer ${SCRIPT_VERSION}
 
 用法：
   $0                              # 交互式：选择安装其中一种模式
+  $0 --address <IP或域名>          # 进入菜单；查看订阅时保存指定地址
   $0 install [选项]               # 无交互安装
 
 无交互模式选择（两者只能安装一个）：
@@ -1018,6 +1088,8 @@ Xray VLESS Unified Installer ${SCRIPT_VERSION}
                       默认：native；无特殊需求保持默认，客户端须与服务端一致
   --sni <域名>        启用 REALITY + Vision；该模式必填
   --short-id <ID>     REALITY Short ID：2-16 位偶数长度十六进制（默认：20220701）
+  --address <地址>    节点连接地址（IPv4、IPv6 或域名）；省略时沿用保存值或自动检测
+  --reinstall         明确允许覆盖已有配置和重新生成密钥（仅 install）
   -h, --help         显示帮助
 
 两种模式均使用 Vision（xtls-rprx-vision）；客户端须支持 VLESS Encryption 及 encryption 参数。
@@ -1035,8 +1107,18 @@ EOF
 }
 
 main() {
+    if [ "${1:-}" = --address ]; then
+        if [ "$#" -ne 2 ] || ! SERVER_ADDRESS=$(normalize_address "$2"); then
+            error "--address 需要一个有效 IP 或域名。"; return 2
+        fi
+        require_root_and_dependencies
+        select_client_state
+        main_menu
+        return
+    fi
     if [ "$#" -gt 0 ] && [ "$1" != install ]; then error "未知参数: $1"; return 2; fi
     require_root_and_dependencies
+    select_client_state
     if [ "$#" -eq 0 ]; then main_menu; return; fi
     shift
     local port=443 uuid="" sni="" sid=20220701
@@ -1051,12 +1133,13 @@ main() {
                 show_help
                 exit 0
                 ;;
-            --port|--uuid|--auth|--mode|--sni|--short-id)
+            --reinstall) REINSTALL_CONFIRMED=true; shift ;;
+            --port|--uuid|--auth|--mode|--sni|--short-id|--address)
                 if [ "$#" -lt 2 ] || [ -z "$2" ] || [[ "$2" = -* ]]; then
                     error "参数 $1 缺少有效值。"
                     exit 2
                 fi
-                case "$1" in --port) port=$2;; --uuid) uuid=$2;; --auth) AUTH_MODE=$2;; --mode) TRAFFIC_MODE=$2;; --sni) sni=$2;; --short-id) sid=$2; REALITY_SHORT_ID_SET=true;; esac; shift 2 ;;
+                case "$1" in --port) port=$2;; --uuid) uuid=$2;; --auth) AUTH_MODE=$2;; --mode) TRAFFIC_MODE=$2;; --sni) sni=$2;; --short-id) sid=$2; REALITY_SHORT_ID_SET=true;; --address) SERVER_ADDRESS=$(normalize_address "$2") || { error "服务器地址无效。"; return 2; };; esac; shift 2 ;;
             *) error "未知参数: $1"; show_help; exit 2 ;;
         esac
     done
@@ -1092,7 +1175,7 @@ if [ "${BASH_SOURCE[0]:-}" = "$0" ] || [ -z "${BASH_SOURCE[0]:-}" ]; then
         show_help
         exit 0
     fi
-    if [ "$#" -gt 0 ] && [ "$1" != install ]; then
+    if [ "$#" -gt 0 ] && [ "$1" != install ] && [ "$1" != --address ]; then
         error "未知参数: $1"; exit 2
     fi
     if [ ! -t 0 ] && [ "${1:-}" != install ]; then
