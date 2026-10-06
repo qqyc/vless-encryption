@@ -2,7 +2,7 @@
 
 Xray VLESS Encryption 安装与管理脚本。
 
-当前版本：`v26.09.27`
+当前版本：`v26.09.27-qqyc.1`（基于上游 v26.09.27 的最小兼容补丁）
 
 支持两种模式：
 
@@ -16,7 +16,7 @@ Xray VLESS Encryption 安装与管理脚本。
 需要 root 权限和 systemd，脚本会自动补齐下载、JSON、校验、进程及端口检查工具。
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/vless-encryption/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/qqyc/vless-encryption/main/install.sh)
 ```
 
 ## 无交互安装
@@ -24,13 +24,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/vless-encryption/ma
 VLESS Encryption：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/vless-encryption/main/install.sh) install --port 12345
+bash <(curl -fsSL https://raw.githubusercontent.com/qqyc/vless-encryption/main/install.sh) install --port 12345
 ```
 
 VLESS Encryption + REALITY + Vision：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/vless-encryption/main/install.sh) install --port 12345 --sni www.sega.com
+bash <(curl -fsSL https://raw.githubusercontent.com/qqyc/vless-encryption/main/install.sh) install --port 12345 --sni www.sega.com
 ```
 
 参数：
@@ -42,9 +42,15 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/vless-encryption/ma
 --mode <native|xorpub|random> 默认 native
 --sni <域名>               启用 REALITY + Vision
 --short-id <十六进制 ID>   默认 20220701，仅 REALITY 可用
+--address <IP或域名>       指定并保存节点连接地址，支持 IPv4 / IPv6 / 域名
+--reinstall                明确允许重装已有节点（覆盖配置并重新生成密钥）
 ```
 
 不带 `--sni` 安装 VLESS Encryption，带 `--sni` 安装 REALITY 模式。Short ID 为 2–16 位偶数长度十六进制。
+
+已有配置时，交互重装必须确认；非交互重装必须添加 `--reinstall`。更新核心或修改现有参数请使用菜单，不要重新执行 `install`。
+
+修改已有节点的连接地址可以运行 `bash install.sh --address 203.0.113.10` 进入菜单，然后查看订阅以保存地址；不会因此修改 UUID 或密钥。地址优先级：本次指定值 > 已保存值 > 自动检测。连接地址不是 REALITY SNI；纯 Encryption 模式仍无需域名。
 
 认证：默认 `mlkem768`（ML-KEM-768，后量子）；`x25519` 密钥更短、非后量子。两者均使用 `mlkem768x25519plus` 后量子密钥交换，密钥不可混用。
 
@@ -62,6 +68,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/vless-encryption/ma
 
 - 配置：`/usr/local/etc/xray/config.json`
 - 客户端 Encryption 参数：`/root/xray_encryption_info.txt`
+- 旧 qqyc fork 若存在 `/var/lib/vless-encryption/client-encryption`，优先沿用该文件；配置写入和回滚也使用同一文件，不读取可能过期的 `/root` 密钥，不自动换密钥。
+- 指定的节点连接地址：`/var/lib/vless-encryption/server-address`（也兼容旧 fork 的保存值）
 - REALITY 客户端信息：`/root/xray_reality_info.txt`
 - 节点链接：`/root/xray_vless_link.txt`
 - 实时日志：`journalctl -u xray -f --no-pager`，按 Ctrl+C 退出。
@@ -71,4 +79,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/vless-encryption/ma
 ```bash
 bash -n install.sh
 shellcheck install.sh
+python3 tests/regression.py
+XRAY_TEST_BINARY=/path/to/xray python3 tests/connectivity.py
 ```
+
+GitHub Actions 在 Linux 上运行语法检查、ShellCheck、回归测试以及真实的本机客户端—服务端握手（两种认证 × 三种流量外观，另验证错误 UUID 被拒绝）。测试核心固定为官方 v26.3.27 并校验 SHA256；不安装系统服务，也不代替实际服务器的防火墙与远程连通性检查。

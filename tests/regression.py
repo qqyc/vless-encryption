@@ -1,6 +1,6 @@
 """Extracted-function regression; no installer entrypoint or host services."""
 import pathlib,re,subprocess,tempfile,unittest,os
-SRC=(pathlib.Path(__file__).resolve().parents[1]/'install.sh').read_text()
+SRC=(pathlib.Path(__file__).resolve().parents[1]/'install.sh').read_text(encoding='utf-8')
 def extract(n):
  m=re.search(r'^'+n+r'\(\) \{[^\n]*\n.*?^\}',SRC,re.M|re.S)
  one=re.search(r'^'+n+r'\(\) \{.*\}\s*$',SRC,re.M)
@@ -9,21 +9,26 @@ def extract(n):
  return m[0]
 class Tests(unittest.TestCase):
  def run_case(self,names,body):
-  with tempfile.TemporaryDirectory(prefix='encryption-test-') as d:
+  with tempfile.TemporaryDirectory(prefix='encryption-test-') as directory:
+   d=pathlib.Path(directory).as_posix()
    setup='''set -euo pipefail
 RUN="$PWD"; XRAY_BIN="$RUN/core"; XRAY_CONFIG="$RUN/config.json"; ENCRYPTION_INFO="$RUN/encryption.info"; REALITY_INFO="$RUN/reality.info"; SUBSCRIPTION_INFO="$RUN/link"; ROLLBACK_DIR=""; INSTALL_ROLLBACK_DIR=""
 AUTH_MODE=mlkem768; TRAFFIC_MODE=native
+REALITY_SHORT_ID_SET=false
+FORK_ENCRYPTION_INFO="$RUN/fork-encryption.info"; UPSTREAM_ENCRYPTION_INFO="$ENCRYPTION_INFO"; SERVER_ADDRESS_INFO="$RUN/state/server-address"; SERVER_ADDRESS=""; REINSTALL_CONFIRMED=true
 C_CYAN='' C_GREEN='' C_YELLOW='' C_RED='' C_MAGENTA=''
 error() { printf 'ERROR %s\\n' "$*" >&2; }; warning() { :; }; info() { :; }; success() { :; }; print_step() { :; }; cecho() { :; }; print_divider() { :; }
 systemctl() { return 99; }; kill() { exit 99; }; pkill() { exit 99; }; pgrep() { return 99; }; apt-get() { exit 99; }; curl() { exit 99; }; sleep() { :; }
 '''
+   if 'install_selected' in names:
+    names=list(dict.fromkeys(names+['confirm_reinstall']))
    if 'restore_install_snapshot' in names:
     names=list(dict.fromkeys(names+['xray_pids','stop_xray_processes']))
     setup+='\npgrep() { return 1; }\n'
    text='\n'.join(extract(n) for n in names)
    for a,b in [('/etc/systemd/system',d+'/system'),('/usr/local/share/xray',d+'/geo'),('/usr/local/etc/xray',d+'/etc'),('/var/log/xray',d+'/logs'),('/tmp/xray-',d+'/snapshot-'),('/proc/',d+'/proc/')]:text=text.replace(a,b)
-   f=pathlib.Path(d)/'fixture.sh';f.write_text(setup+text+'\n'+body)
-   o=subprocess.run(['bash',str(f)],cwd=d,text=True,capture_output=True,timeout=15)
+   f=pathlib.Path(d)/'fixture.sh';f.write_text(setup+text+'\n'+body,encoding='utf-8',newline='\n')
+   o=subprocess.run(['bash',f.as_posix()],cwd=d,text=True,encoding='utf-8',capture_output=True,timeout=90)
    self.assertEqual(o.returncode,0,o.stdout+o.stderr);return o
  def test_official_core_matrix(self):
   binary=os.environ.get('XRAY_TEST_BINARY')
@@ -176,6 +181,7 @@ if begin_install_snapshot; then exit 81; fi
   o=self.run_case(['require_root_and_dependencies'],r'''
 id() { printf 0; }
 command() { if [[ "$*" = '-v pgrep' && ! -e ready ]]; then return 1; fi; builtin command "$@"; }
+ss() { :; }
 apt-get() { printf '%s\n' "$*"; touch ready; }
 require_root_and_dependencies
 [[ -f ready ]]
@@ -248,4 +254,71 @@ if port_in_use 443; then exit 81; else [[ $? = 2 ]]; fi''')
  def test_ipv6(self):
   self.run_case(['valid_ipv6'],'''for ip in '1::2:' ':1::2'; do if valid_ipv6 "$ip"; then exit 81; fi; done
 for ip in '::' '::1' '2001:db8::' '::ffff:192.0.2.1'; do valid_ipv6 "$ip" || exit 82; done''')
+ def test_address_validation(self):
+  self.run_case(['normalize_address','valid_ipv6','valid_sni'],r'''
+[[ $(normalize_address 192.0.2.1) = 192.0.2.1 ]]
+[[ $(normalize_address 2001:db8::1) = '[2001:db8::1]' ]]
+[[ $(normalize_address '[2001:db8::1]') = '[2001:db8::1]' ]]
+[[ $(normalize_address node.example.org) = node.example.org ]]
+for address in '999.1.1.1' '1.2.3.4.' '01.2.3.4' '1::2:' '[::1' 'http://node.example.org' 'node.example.org/path' 'node.example.org?x=1' 'bad host'; do
+ if normalize_address "$address"; then exit 81; fi
+done
+''')
+ def test_address_precedence_and_persistence(self):
+  self.run_case(['public_ip','save_server_address','normalize_address','valid_ipv6','valid_sni'],r'''
+mkdir -p "$(dirname "$SERVER_ADDRESS_INFO")"
+printf '192.0.2.1\n' > "$SERVER_ADDRESS_INFO"
+[[ $(public_ip) = 192.0.2.1 ]]
+SERVER_ADDRESS='2001:db8::2'
+[[ $(public_ip) = '[2001:db8::2]' ]]
+save_server_address
+SERVER_ADDRESS=''
+[[ $(public_ip) = '[2001:db8::2]' ]]
+printf 'INVALID/address' > "$SERVER_ADDRESS_INFO"
+if public_ip; then exit 81; fi
+''')
+ def test_fork_key_precedence_without_rotation(self):
+  self.run_case(['select_client_state'],r'''
+printf stale > "$ENCRYPTION_INFO"
+select_client_state
+[[ "$ENCRYPTION_INFO" = "$UPSTREAM_ENCRYPTION_INFO" ]]
+printf current > "$FORK_ENCRYPTION_INFO"
+select_client_state
+[[ "$ENCRYPTION_INFO" = "$FORK_ENCRYPTION_INFO" && $(< "$ENCRYPTION_INFO") = current ]]
+[[ $(< "$UPSTREAM_ENCRYPTION_INFO") = stale ]]
+''')
+ def test_reinstall_requires_explicit_confirmation(self):
+  self.run_case(['confirm_reinstall'],r'''
+REINSTALL_CONFIRMED=false
+confirm_reinstall
+printf ORIGINAL > "$XRAY_CONFIG"
+if confirm_reinstall; then exit 81; else [[ $? = 2 ]]; fi
+[[ $(< "$XRAY_CONFIG") = ORIGINAL ]]
+REINSTALL_CONFIRMED=true
+confirm_reinstall
+''')
+ def test_reinstall_blocks_before_installer_or_key_generation(self):
+  self.run_case(['install_selected','confirm_reinstall'],r'''
+REINSTALL_CONFIRMED=false
+printf ORIGINAL > "$XRAY_CONFIG"
+run_official_installer() { exit 81; }; generate_encryption_pair() { exit 82; }
+if install_selected 443 uuid encryption; then exit 83; else [[ $? = 2 ]]; fi
+[[ $(< "$XRAY_CONFIG") = ORIGINAL && -z "$INSTALL_ROLLBACK_DIR" ]]
+''')
+ def test_menu_address_does_not_reinstall(self):
+  self.run_case(['main','normalize_address','valid_ipv6','valid_sni','select_client_state'],r'''
+require_root_and_dependencies() { :; }
+main_menu() { [[ "$SERVER_ADDRESS" = '[2001:db8::3]' && "$ENCRYPTION_INFO" = "$FORK_ENCRYPTION_INFO" ]]; }
+install_selected() { exit 81; }
+printf ORIGINAL > "$XRAY_CONFIG"; printf current > "$FORK_ENCRYPTION_INFO"
+main --address 2001:db8::3
+[[ $(< "$XRAY_CONFIG") = ORIGINAL && $(< "$FORK_ENCRYPTION_INFO") = current ]]
+if main --address; then exit 82; else [[ $? = 2 ]]; fi
+''')
+ def test_install_address_and_reinstall_options(self):
+  self.run_case(['main','normalize_address','valid_ipv6','valid_sni','select_client_state','valid_port','valid_uuid','valid_auth','valid_appearance'],r'''
+require_root_and_dependencies() { :; }; current_port() { printf 443; }
+install_selected() { [[ "$SERVER_ADDRESS" = 192.0.2.2 && "$REINSTALL_CONFIRMED" = true && "$3" = encryption ]]; }
+main install --address 192.0.2.2 --reinstall --uuid 00000000-0000-4000-8000-000000000000
+''')
 if __name__=='__main__':unittest.main(verbosity=2)
