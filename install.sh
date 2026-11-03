@@ -2,17 +2,22 @@
 # ==============================================================================
 # Xray VLESS Encryption 极简一键安装脚本
 # 系统支持: Debian 10+ / Ubuntu 20.04+
-# 版本: v26.10.28
+# 版本: v26.10.28-qqyc.2
 # ==============================================================================
 
 set -euo pipefail
 
-SCRIPT_VERSION="v26.10.28"
+SCRIPT_VERSION="v26.10.28-qqyc.2"
+MIN_XRAY_VERSION="26.10.31"
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_CONFIG="/usr/local/etc/xray/config.json"
 XRAY_INSTALL_URL="https://raw.githubusercontent.com/XTLS/Xray-install/e741a4f56d368afbb9e5be3361b40c4552d3710d/install-release.sh"
 XRAY_INSTALL_SHA256="7f70c95f6b418da8b4f4883343d602964915e28748993870fd554383afdbe555"
 ENCRYPTION_INFO="/root/xray_encryption_info.txt"
+UPSTREAM_ENCRYPTION_INFO="$ENCRYPTION_INFO"
+FORK_ENCRYPTION_INFO="/var/lib/vless-encryption/client-encryption"
+SERVER_ADDRESS_INFO="/var/lib/vless-encryption/server-address"
+REINSTALL_CONFIRMED=false
 REALITY_INFO="/root/xray_reality_info.txt"       # public_key|sni|short_id
 SUBSCRIPTION_INFO="/root/xray_vless_link.txt"
 AUTH_MODE="mlkem768"
@@ -54,6 +59,19 @@ error() {
     esac
 }
 section_title() { cecho "$C_MAGENTA$C_BOLD" "◆ $1" 1; }
+
+confirm_reinstall() {
+    local confirm
+    [ -f "$XRAY_CONFIG" ] || return 0
+    [ "$REINSTALL_CONFIRMED" = true ] && return 0
+    if [ ! -t 0 ]; then
+        error "已有配置；非交互重装必须显式添加 --reinstall。"
+        return 2
+    fi
+    warning "重装将覆盖整个配置并生成新密钥，旧链接会失效；更新核心或修改参数请使用菜单。"
+    read -r -p "  确定重装？[y/N]: " confirm || return 2
+    [[ "$confirm" =~ ^[yY]$ ]] || { info "已取消重装。"; return 1; }
+}
 
 require_root_and_dependencies() {
     [ "$(id -u)" = 0 ] || { error "必须以 root 用户运行此脚本。"; exit 1; }
@@ -216,6 +234,16 @@ current_xray_version() {
     "$XRAY_BIN" version 2>/dev/null | awk 'NR==1 {gsub(/^v/, "", $2); print $2; exit}'
 }
 
+require_current_core() {
+    local version
+    version=$(current_xray_version) || version=''
+    if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+       [ "$(printf '%s\n%s\n' "$MIN_XRAY_VERSION" "$version" | sort -V | head -n 1)" != "$MIN_XRAY_VERSION" ]; then
+        error "写入新配置需要官方 Xray ${MIN_XRAY_VERSION} 或更新版本（当前 ${version:-未知}）；请先用菜单 2 更新。旧配置未改动。"
+        return 1
+    fi
+}
+
 extract_vlessenc_value() {
     local output="$1" section="$2" field="$3"
     awk -v section="$section" -v field="$field" '
@@ -297,10 +325,41 @@ generate_reality_keys() {
     printf '%s|%s\n' "$private" "$public"
 }
 
+select_client_state() {
+    local dec private output public candidate value
+    ENCRYPTION_INFO="$UPSTREAM_ENCRYPTION_INFO"
+    [ -f "$FORK_ENCRYPTION_INFO" ] && [ -f "$XRAY_CONFIG" ] || return 0
+    # Check against the running configuration, not file age or a blind path preference.
+    dec=$(jq -r '.inbounds[0].settings.decryption // empty' "$XRAY_CONFIG") || return 1
+    validate_encryption_token "$dec" 600s || return 1
+    private=${dec##*.}
+    # Raw URL-safe Base64 omits padding; choose the official derivation by key length.
+    case "${#private}" in
+        43) output=$("$XRAY_BIN" x25519 -i "$private" 2>/dev/null) || return 1
+            public=$(awk '/^(Password|PublicKey:|Public key:)/ {print $NF; exit}' <<< "$output") ;;
+        86) output=$("$XRAY_BIN" mlkem768 -i "$private" 2>/dev/null) || return 1
+            public=$(awk '/^Client:/ {print $NF; exit}' <<< "$output") ;;
+        *) error "无法核验旧 fork 的密钥，未更改配置。"; return 1 ;;
+    esac
+    [ -n "$public" ] || { error "无法推导客户端公钥，未更改配置或密钥。"; return 1; }
+    for candidate in "$UPSTREAM_ENCRYPTION_INFO" "$FORK_ENCRYPTION_INFO"; do
+        [ -f "$candidate" ] || continue
+        value=$(tr -d '\r\n' < "$candidate")
+        if validate_encryption_token "$value" 0rtt &&
+           [ "${value%%.0rtt.*}" = "${dec%%.600s.*}" ] && [[ ".$value." = *".$public."* ]]; then
+            ENCRYPTION_INFO="$candidate"
+            return 0
+        fi
+    done
+    error "客户端密钥与当前配置不匹配，未生成链接或修改密钥；请从备份恢复匹配文件。"
+    return 1
+}
+
 write_config() {
     local port="$1" uuid="$2" decryption="$3" encryption="$4" mode="$5" private="${6:-}" public="${7:-}" sni="${8:-}" short_id="${9:-}"
     local tmp account user group enc_tmp reality_tmp test_log snapshot merged
     local preserve="${10:-false}"
+    require_current_core || return 1
     if [ -n "$ROLLBACK_DIR" ] && [ -d "$ROLLBACK_DIR" ]; then
         error "存在未完成恢复，请先处理快照：$ROLLBACK_DIR"; return 1
     fi
@@ -458,6 +517,16 @@ valid_ipv4() {
 
 public_ip() {
     local ip cache_file="/usr/local/etc/xray/.public-ip"
+    if [ -f "$SERVER_ADDRESS_INFO" ]; then
+        ip=$(tr -d '\r\n' < "$SERVER_ADDRESS_INFO")
+        if [[ "$ip" = \[*\] ]]; then ip=${ip:1:${#ip}-2}; fi
+        if valid_ipv4 "$ip" || { [[ "$ip" != *:* && ! "$ip" =~ ^[0-9.]+$ ]] && valid_sni "$ip"; }; then
+            printf '%s\n' "$ip"; return
+        elif valid_ipv6 "$ip"; then
+            printf '[%s]\n' "$ip"; return
+        fi
+        error "旧 fork 保存的服务器地址无效，请修复 $SERVER_ADDRESS_INFO。"; return 1
+    fi
     # 缓存 1 天，避免每次查看配置都发起网络请求；公网 IP 变更后自动刷新
     if [ -f "$cache_file" ] && [ -z "$(find "$cache_file" -mmin +1440 2>/dev/null)" ]; then
         ip=$(<"$cache_file")
@@ -484,6 +553,7 @@ public_ip() {
 
 show_subscription() {
     local address uuid port encryption security public sni sid link title seed verify="" keys
+    select_client_state || return 1
     if [ ! -f "$XRAY_CONFIG" ] || [ ! -f "$ENCRYPTION_INFO" ]; then
         error "缺少配置或客户端信息。"
         return 1
@@ -493,7 +563,7 @@ show_subscription() {
         return 1
     }
     address=$(public_ip) || { error "无法获取公网 IP，无法生成订阅链接。"; return 1; }
-    uuid=$(jq -r '(.inbounds[0].settings.clients // .inbounds[0].settings.users)[0].id' "$XRAY_CONFIG"); port=$(jq -r '.inbounds[0].port' "$XRAY_CONFIG"); encryption=$(<"$ENCRYPTION_INFO")
+    uuid=$(jq -r '(.inbounds[0].settings.clients // .inbounds[0].settings.users)[0].id' "$XRAY_CONFIG"); port=$(jq -r '.inbounds[0].port' "$XRAY_CONFIG"); encryption=$(tr -d '\r\n' < "$ENCRYPTION_INFO")
     if ! valid_port "$port" || ! valid_uuid "$uuid" || ! validate_encryption_token "$encryption" 0rtt; then
         error "客户端加密信息或配置参数无效，未生成订阅链接。"; return 1
     fi
@@ -618,7 +688,8 @@ stop_xray_processes() {
 
 has_xray_residue() {
     local path pids
-    for path in "$XRAY_BIN" "$XRAY_CONFIG" "$ENCRYPTION_INFO" "$REALITY_INFO" "$SUBSCRIPTION_INFO" \
+    for path in "$XRAY_BIN" "$XRAY_CONFIG" "$ENCRYPTION_INFO" "$UPSTREAM_ENCRYPTION_INFO" "$FORK_ENCRYPTION_INFO" \
+        "$SERVER_ADDRESS_INFO" "$REALITY_INFO" "$SUBSCRIPTION_INFO" \
         /usr/local/etc/xray /usr/local/share/xray /var/log/xray \
         /etc/systemd/system/xray.service /etc/systemd/system/xray@.service \
         /etc/systemd/system/xray.service.d /etc/systemd/system/xray@.service.d; do
@@ -656,7 +727,8 @@ uninstall_xray() {
     if ! rm -rf /usr/local/etc/xray /usr/local/share/xray /var/log/xray \
             /etc/systemd/system/xray.service.d /etc/systemd/system/xray@.service.d ||
        ! rm -f "$XRAY_BIN" /etc/systemd/system/xray.service /etc/systemd/system/xray@.service \
-            "$ENCRYPTION_INFO" "$REALITY_INFO" "$SUBSCRIPTION_INFO"; then
+            "$ENCRYPTION_INFO" "$UPSTREAM_ENCRYPTION_INFO" "$FORK_ENCRYPTION_INFO" \
+            "$SERVER_ADDRESS_INFO" "$REALITY_INFO" "$SUBSCRIPTION_INFO"; then
         error "残留文件清理失败，保留本脚本以便重试。"; return 1
     fi
     systemctl daemon-reload || { error "systemd 重载失败。"; return 1; }
@@ -820,6 +892,8 @@ restart_xray() {
 
 install_selected() {
     local port="$1" uuid="$2" mode="$3" sni="${4:-}" sid="${5:-}" pair dec enc keys private public
+    confirm_reinstall || return $?
+    select_client_state || return 1
     local total=4 path
     local -a service_args=()
     [ "$mode" != reality ] || total=5
@@ -894,6 +968,8 @@ interactive_install() {
 modify_config() {
     local current_mode target_mode choice port uuid sni="" sid="20220701" dec enc private="" public="" pair keys input
     local step=0 total=1 was_active=false
+    require_current_core || return 1
+    select_client_state || return 1
     if [ -n "$INSTALL_ROLLBACK_DIR" ] && [ -d "$INSTALL_ROLLBACK_DIR" ]; then
         error "存在未完成恢复，请先处理快照：$INSTALL_ROLLBACK_DIR"; return 1
     fi
@@ -965,7 +1041,7 @@ modify_config() {
 
     if [ "$target_mode" = "$current_mode" ]; then
         dec=$(jq -r '.inbounds[0].settings.decryption' "$XRAY_CONFIG")
-        enc=$(<"$ENCRYPTION_INFO")
+        enc=$(tr -d '\r\n' < "$ENCRYPTION_INFO")
     else
         step=$((step + 1)); print_step "$step" "$total" "正在生成 $([ "$target_mode" = reality ] && echo 'REALITY 模式' || echo 'Encryption 模式') 密钥材料..."
         pair=$(generate_encryption_pair) || return 1
@@ -1072,6 +1148,7 @@ Xray VLESS Unified Installer ${SCRIPT_VERSION}
                       默认：native；无特殊需求保持默认，客户端须与服务端一致
   --sni <域名>        启用 REALITY + Vision；该模式必填
   --short-id <ID>     REALITY Short ID：2-16 位偶数长度十六进制（默认：20220701）
+  --reinstall         明确允许覆盖已有配置并重新生成密钥（仅 install）
   -h, --help         显示帮助
 
 两种模式均使用 Vision（xtls-rprx-vision）；客户端须支持 VLESS Encryption 及 encryption 参数。
@@ -1080,6 +1157,7 @@ SNI 是服务器可达、支持 TLS 1.3 的目标域名（443），无需自有�
 认证一般选默认 mlkem768；x25519 认证密钥更短，但不具备后量子认证能力。
 两种认证均使用 mlkem768x25519plus 后量子密钥交换；不要混用两组密钥。
 安装 / 重装覆盖整个 Xray 配置；请自行放行节点端口。
+写入新配置要求官方 Xray >= ${MIN_XRAY_VERSION}；旧节点先用菜单 2 更新，无需重装。
 
 示例：
   $0 install --port 12345
@@ -1104,6 +1182,7 @@ main() {
                 show_help
                 exit 0
                 ;;
+            --reinstall) REINSTALL_CONFIRMED=true; shift ;;
             --port|--uuid|--auth|--mode|--sni|--short-id)
                 if [ "$#" -lt 2 ] || [ -z "$2" ] || [[ "$2" = -* ]]; then
                     error "参数 $1 缺少有效值。"
