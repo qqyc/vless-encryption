@@ -1,6 +1,6 @@
 """Extracted-function regression; no installer entrypoint or host services."""
 import pathlib,re,subprocess,tempfile,unittest,os
-SRC=(pathlib.Path(__file__).resolve().parents[1]/'install.sh').read_text()
+SRC=(pathlib.Path(__file__).resolve().parents[1]/'install.sh').read_text(encoding='utf-8')
 def extract(n):
  m=re.search(r'^'+n+r'\(\) \{[^\n]*\n.*?^\}',SRC,re.M|re.S)
  one=re.search(r'^'+n+r'\(\) \{.*\}\s*$',SRC,re.M)
@@ -9,21 +9,29 @@ def extract(n):
  return m[0]
 class Tests(unittest.TestCase):
  def run_case(self,names,body):
-  with tempfile.TemporaryDirectory(prefix='encryption-test-') as d:
+  with tempfile.TemporaryDirectory(prefix='encryption-test-') as directory:
+   d=pathlib.Path(directory).as_posix()
    setup='''set -euo pipefail
 RUN="$PWD"; XRAY_BIN="$RUN/core"; XRAY_CONFIG="$RUN/config.json"; ENCRYPTION_INFO="$RUN/encryption.info"; REALITY_INFO="$RUN/reality.info"; SUBSCRIPTION_INFO="$RUN/link"; ROLLBACK_DIR=""; INSTALL_ROLLBACK_DIR=""
 AUTH_MODE=mlkem768; TRAFFIC_MODE=native
+MIN_XRAY_VERSION=26.10.31; REALITY_SHORT_ID_SET=false; REINSTALL_CONFIRMED=true
+UPSTREAM_ENCRYPTION_INFO="$ENCRYPTION_INFO"; FORK_ENCRYPTION_INFO="$RUN/fork-encryption.info"; SERVER_ADDRESS_INFO="$RUN/server-address"
+require_current_core() { :; }; select_client_state() { :; }
 C_CYAN='' C_GREEN='' C_YELLOW='' C_RED='' C_MAGENTA=''
 error() { printf 'ERROR %s\\n' "$*" >&2; }; warning() { :; }; info() { :; }; success() { :; }; print_step() { :; }; cecho() { :; }; print_divider() { :; }
 systemctl() { return 99; }; kill() { exit 99; }; pkill() { exit 99; }; pgrep() { return 99; }; apt-get() { exit 99; }; curl() { exit 99; }; sleep() { :; }
 '''
+   if 'install_selected' in names:
+    names=list(dict.fromkeys(names+['confirm_reinstall']))
+   if 'public_ip' in names:
+    names=list(dict.fromkeys(names+['valid_sni']))
    if 'restore_install_snapshot' in names:
     names=list(dict.fromkeys(names+['xray_pids','stop_xray_processes']))
     setup+='\npgrep() { return 1; }\n'
    text='\n'.join(extract(n) for n in names)
    for a,b in [('/etc/systemd/system',d+'/system'),('/usr/local/share/xray',d+'/geo'),('/usr/local/etc/xray',d+'/etc'),('/var/log/xray',d+'/logs'),('/tmp/xray-',d+'/snapshot-'),('/proc/',d+'/proc/')]:text=text.replace(a,b)
-   f=pathlib.Path(d)/'fixture.sh';f.write_text(setup+text+'\n'+body)
-   o=subprocess.run(['bash',str(f)],cwd=d,text=True,capture_output=True,timeout=15)
+   f=pathlib.Path(d)/'fixture.sh';f.write_text(setup+text+'\n'+body,encoding='utf-8',newline='\n')
+   o=subprocess.run(['bash',f.as_posix()],cwd=d,text=True,encoding='utf-8',capture_output=True,timeout=90)
    self.assertEqual(o.returncode,0,o.stdout+o.stderr);return o
  def test_mainpid_without_modern_value_flag(self):
   self.run_case(['xray_main_pid'],r'''
@@ -386,6 +394,7 @@ if begin_install_snapshot; then exit 81; fi
   o=self.run_case(['require_root_and_dependencies'],r'''
 id() { printf 0; }
 command() { if [[ "$*" = '-v pgrep' && ! -e ready ]]; then return 1; fi; builtin command "$@"; }
+ss() { :; }
 apt-get() { printf '%s\n' "$*"; touch ready; }
 require_root_and_dependencies
 [[ -f ready ]]
@@ -458,4 +467,95 @@ if port_in_use 443; then exit 81; else [[ $? = 2 ]]; fi''')
  def test_ipv6(self):
   self.run_case(['valid_ipv6'],'''for ip in '1::2:' ':1::2'; do if valid_ipv6 "$ip"; then exit 81; fi; done
 for ip in '::' '::1' '2001:db8::' '::ffff:192.0.2.1'; do valid_ipv6 "$ip" || exit 82; done''')
+ def test_core_version_guard(self):
+  self.run_case(['require_current_core'],r'''
+for test_version in 26.3.27 26.10.29 unknown 26.10.31-dev ''; do
+ current_xray_version() { printf '%s\n' "$test_version"; }
+ if require_current_core; then exit 81; fi
+done
+for test_version in 26.10.31 26.11.1 27.1.1; do
+ current_xray_version() { printf '%s\n' "$test_version"; }
+ require_current_core
+done
+current_xray_version() { return 1; }
+if require_current_core; then exit 82; fi
+''')
+ def test_old_core_cannot_write_or_migrate_configuration(self):
+  self.run_case(['require_current_core','write_config','modify_config'],r'''
+printf ORIGINAL > "$XRAY_CONFIG"; printf ORIGINAL_KEY > "$ENCRYPTION_INFO"
+current_xray_version() { printf 26.3.27; }
+validate_encryption_token() { exit 81; }; service_account() { exit 82; }
+read() { exit 83; }; restart_xray() { exit 84; }
+if write_config 443 uuid dec enc encryption; then exit 85; fi
+if modify_config; then exit 86; fi
+[[ $(< "$XRAY_CONFIG") = ORIGINAL && $(< "$ENCRYPTION_INFO") = ORIGINAL_KEY && -z "$ROLLBACK_DIR" ]]
+''')
+ def test_saved_server_address_is_used_without_network(self):
+  self.run_case(['public_ip','valid_ipv4','valid_ipv6'],r'''
+for address in 203.0.113.9 node.example.org; do
+ printf '%s\n' "$address" > "$SERVER_ADDRESS_INFO"
+ [[ $(public_ip) = "$address" ]]
+done
+for address in 2001:db8::9 '[2001:db8::9]'; do
+ printf '%s\n' "$address" > "$SERVER_ADDRESS_INFO"
+ [[ $(public_ip) = '[2001:db8::9]' ]]
+done
+for address in '' bad@host/path 999.1.1.1 '001.2.3.4' '1::2:'; do
+ printf '%s\n' "$address" > "$SERVER_ADDRESS_INFO"
+ if public_ip; then exit 81; fi
+done
+''')
+ def test_reinstall_is_opt_in_before_any_install_side_effects(self):
+  self.run_case(['confirm_reinstall','install_selected'],r'''
+REINSTALL_CONFIRMED=false
+confirm_reinstall
+printf ORIGINAL > "$XRAY_CONFIG"
+if confirm_reinstall; then exit 81; else [[ $? = 2 ]]; fi
+run_official_installer() { exit 82; }; begin_install_snapshot() { exit 83; }
+if install_selected 443 uuid encryption; then exit 84; else [[ $? = 2 ]]; fi
+[[ $(< "$XRAY_CONFIG") = ORIGINAL ]]
+REINSTALL_CONFIRMED=true
+confirm_reinstall
+''')
+ def test_reinstall_cli_flag(self):
+  self.run_case(['main','valid_port','valid_uuid','valid_auth','valid_appearance'],r'''
+require_root_and_dependencies() { :; }; current_port() { printf 443; }
+install_selected() { [[ "$REINSTALL_CONFIRMED" = true && "$3" = encryption ]]; }
+main install --reinstall --uuid 00000000-0000-4000-8000-000000000000
+''')
+ def test_legacy_key_selection_checks_current_config(self):
+  if not os.environ.get('XRAY_TEST_BINARY'):self.skipTest('set XRAY_TEST_BINARY to an official core')
+  names=['select_client_state','validate_encryption_token','valid_appearance','generate_encryption_pair','extract_vlessenc_value']
+  self.run_case(names,r'''
+XRAY_BIN="$XRAY_TEST_BINARY"
+for AUTH_MODE in x25519 mlkem768; do
+ pair=$(generate_encryption_pair); IFS='|' read -r dec enc <<< "$pair"
+ other=$(generate_encryption_pair); other=${other#*|}
+ jq -n --arg dec "$dec" '{inbounds:[{settings:{decryption:$dec}}]}' > "$XRAY_CONFIG"
+ printf '%s\n' "$enc" > "$FORK_ENCRYPTION_INFO"
+ printf '%s\n' "$other" > "$UPSTREAM_ENCRYPTION_INFO"
+ select_client_state
+ [[ "$ENCRYPTION_INFO" = "$FORK_ENCRYPTION_INFO" ]]
+ printf '%s\n' "$enc" > "$UPSTREAM_ENCRYPTION_INFO"
+ printf '%s\n' "$other" > "$FORK_ENCRYPTION_INFO"
+ select_client_state
+ [[ "$ENCRYPTION_INFO" = "$UPSTREAM_ENCRYPTION_INFO" ]]
+ printf '%s\n' "$other" > "$UPSTREAM_ENCRYPTION_INFO"
+ if select_client_state; then exit 81; fi
+ [[ $(< "$UPSTREAM_ENCRYPTION_INFO") = "$other" && $(< "$FORK_ENCRYPTION_INFO") = "$other" ]]
+ printf '%s\n' "$enc" > "$FORK_ENCRYPTION_INFO"; rm "$UPSTREAM_ENCRYPTION_INFO"
+ select_client_state
+ [[ "$ENCRYPTION_INFO" = "$FORK_ENCRYPTION_INFO" ]]
+ rm "$FORK_ENCRYPTION_INFO"
+ select_client_state
+ [[ "$ENCRYPTION_INFO" = "$UPSTREAM_ENCRYPTION_INFO" ]]
+done
+''')
+ def test_invalid_key_selection_prevents_subscription_export(self):
+  self.run_case(['show_subscription'],r'''
+select_client_state() { return 1; }
+public_ip() { exit 81; }
+if show_subscription; then exit 82; fi
+[[ ! -e "$SUBSCRIPTION_INFO" ]]
+''')
 if __name__=='__main__':unittest.main(verbosity=2)

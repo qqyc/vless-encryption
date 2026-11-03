@@ -1,0 +1,48 @@
+name: Test installer
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq shellcheck
+      - name: Syntax and lint
+        run: |
+          bash -n install.sh
+          shellcheck install.sh
+      - name: Download checksum-verified official test fixtures
+        run: |
+          curl --fail --location --retry 3 --max-time 120 \
+            https://github.com/XTLS/Xray-core/releases/download/v26.10.31/Xray-linux-64.zip \
+            -o "$RUNNER_TEMP/xray.zip"
+          printf '%s  %s\n' 'e4bd9119f50ae7c41658b1abd0679ae06f98bd864a2907ff33f2f2cf7081b214' "$RUNNER_TEMP/xray.zip" | sha256sum -c
+          mkdir -p "$RUNNER_TEMP/xray-test"
+          unzip -q "$RUNNER_TEMP/xray.zip" -d "$RUNNER_TEMP/xray-test"
+          chmod +x "$RUNNER_TEMP/xray-test/xray"
+          echo "XRAY_TEST_BINARY=$RUNNER_TEMP/xray-test/xray" >> "$GITHUB_ENV"
+          curl --fail --location --retry 3 --max-time 120 \
+            https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip \
+            -o "$RUNNER_TEMP/xray-old.zip"
+          printf '%s  %s\n' '23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae' "$RUNNER_TEMP/xray-old.zip" | sha256sum -c
+          mkdir -p "$RUNNER_TEMP/xray-old"
+          unzip -q "$RUNNER_TEMP/xray-old.zip" -d "$RUNNER_TEMP/xray-old"
+          chmod +x "$RUNNER_TEMP/xray-old/xray"
+          echo "XRAY_TEST_OLD_BINARY=$RUNNER_TEMP/xray-old/xray" >> "$GITHUB_ENV"
+          curl --fail --location --retry 3 --max-time 120 \
+            https://raw.githubusercontent.com/XTLS/Xray-install/e741a4f56d368afbb9e5be3361b40c4552d3710d/install-release.sh \
+            -o "$RUNNER_TEMP/pinned-installer.sh"
+          printf '%s  %s\n' '7f70c95f6b418da8b4f4883343d602964915e28748993870fd554383afdbe555' "$RUNNER_TEMP/pinned-installer.sh" | sha256sum -c
+          echo "PINNED_INSTALLER=$RUNNER_TEMP/pinned-installer.sh" >> "$GITHUB_ENV"
+      - name: Regression and real loopback handshake
+        run: |
+          python3 tests/regression.py
+          python3 tests/connectivity.py

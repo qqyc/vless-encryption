@@ -2,12 +2,14 @@
 
 一键安装和管理 Xray 的 **VLESS Encryption**，可选叠加 **REALITY**。客户端及其内核须支持 VLESS Encryption、链接中的 `encryption` 参数和 Vision；仅支持普通 VLESS/REALITY 的客户端不适用。
 
+本 fork：`v26.10.28-qqyc.2`，基于上游 v26.10.28 的最小兼容补丁。写入新配置要求官方 Xray **26.10.31 或更新版本**（安全基线）；已有旧节点请先用菜单 `2` 更新核心，不需要重装。查看旧配置、更新核心不受此写入保护限制。
+
 ## 使用
 
 需要 **root、Bash、curl、systemd**，依赖安装支持 apt、dnf 或 yum；在交互终端运行：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/vless-encryption/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/qqyc/vless-encryption/main/install.sh)
 ```
 
 选择 `1` 安装，再选择模式：
@@ -23,8 +25,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/vless-encryption/ma
 
 - 配置：`/usr/local/etc/xray/config.json`；节点链接：`/root/xray_vless_link.txt`。
 - 客户端参数：`/root/xray_encryption_info.txt`、`/root/xray_reality_info.txt`；含连接凭据，请勿公开。
+- 旧 fork 的 `/var/lib/vless-encryption/client-encryption` 仍可使用；若存在两份客户端密钥，会对照当前服务端配置推导公钥，选择匹配文件，写入和回滚使用同一路径。都不匹配时拒绝导出或修改，不自动更换 UUID 或密钥。
+- 旧 fork 已保存的 `/var/lib/vless-encryption/server-address` 优先于自动检测，支持 IP 和域名；无此文件时保持上游行为，纯 Encryption 仍无需域名。
 - 日志：`journalctl -u xray -f --no-pager`，按 Ctrl+C 退出。
-- **安装 / 重装覆盖整个 Xray 配置，含自定义内容，请先备份；重装后重新导入节点。**
+- **安装 / 重装覆盖整个 Xray 配置，含自定义内容，请先备份；已有节点必须确认重装，之后重新导入节点。**
 - 修改只更新首个入站相关字段，保留其他配置；回车保留当前参数。更换 SNI 会同步目标为该域名的 443 端口，修改后更新客户端节点。
 - 新配置使用官方 `users`、`method: raw` 和 REALITY `target` 字段；旧配置仍可读取，修改时迁移相关字段并保留其余内容。
 - REALITY 配置已有 `mldsa65Seed` 时，订阅自动附带官方 `pqv` 验证公钥；客户端须支持 ML-DSA-65，默认不启用。
@@ -35,10 +39,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/vless-encryption/ma
 <details>
 <summary>无交互安装与参数</summary>
 
-不带 `--sni` 安装 VLESS Encryption，添加 `--sni www.sega.com` 则安装 REALITY 模式；均覆盖已有配置，不询问重装确认：
+不带 `--sni` 安装 VLESS Encryption，添加 `--sni www.sega.com` 则安装 REALITY 模式。已有配置时必须显式添加 `--reinstall` 才允许非交互重装：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/vless-encryption/main/install.sh) install --port 12345
+bash <(curl -fsSL https://raw.githubusercontent.com/qqyc/vless-encryption/main/install.sh) install --port 12345
 ```
 
 - `--port` 默认 `443`，`--uuid` 不填自动生成。
@@ -46,9 +50,14 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yahuisme/vless-encryption/ma
 - `--short-id` 默认 `20220701`，须为 2–16 位偶数长度十六进制，仅与 `--sni` 同用。
 - `--auth` 默认 `mlkem768`（后量子认证），可选 `x25519`（密钥更短、非后量子认证）；两者均使用 `mlkem768x25519plus` 后量子密钥交换。
 - `--mode` 默认 `native`（原始格式），可选 `xorpub`（混淆公钥部分）、`random`（全随机外观），客户端须与服务端一致。
+- `--reinstall` 明确允许覆盖已有配置并生成新密钥；更新核心或修改参数请使用菜单，不要重新安装。
 
 一般保持默认认证和外观即可。在首次命令末尾加 `--help` 或 `install --help` 查看帮助。
 
 </details>
 
 回滚失败时保留报出的 `/tmp/xray-rollback.*` 或 `/tmp/xray-install-rollback.*`，按快照恢复配置、客户端信息及对应的核心 / 数据 / 服务文件，核对服务状态后再清理。重新运行不会识别旧快照，勿靠重启脚本绕过恢复。
+
+## 测试
+
+GitHub Actions 执行 `bash -n install.sh`、`shellcheck install.sh`、`python3 tests/regression.py` 和 `python3 tests/connectivity.py`。官方测试核心与固定安装器均校验 SHA256；真实连接覆盖两种认证 × 三种流量外观、错误 UUID、两种密钥文件残留情形，以及官方旧核心拒绝写配置。测试只使用临时文件和本机端口；仅临时测试配置放行本机 HTTP 目标，不关闭生产节点的私网访问保护，也不安装或操作系统服务。
